@@ -1,0 +1,505 @@
+package com.blueplanet.inventory.rest.showcase.namingapi;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Map.Entry;
+import java.util.Queue;
+
+import com.blueplanet.inventory.neo4j.api.technology.constants.TechnologyLabels;
+import com.blueplanet.inventory.rest.constants.ProjectMessages;
+import com.blueplanet.data.core.util.L10nUtils;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import com.blueplanet.inventory.neo4j.api.neo4j.dao.FusionGraphInventoryEnriched;
+import com.blueplanet.inventory.neo4j.graph.graphdb.Direction;
+import com.blueplanet.inventory.neo4j.graph.graphdb.Label;
+import com.blueplanet.inventory.neo4j.graph.graphdb.Node;
+import com.blueplanet.inventory.neo4j.graph.graphdb.PropertyContainer;
+import com.blueplanet.inventory.neo4j.graph.graphdb.PropertyContainerBuilder;
+import com.blueplanet.inventory.neo4j.graph.graphdb.Subgraph;
+import com.blueplanet.inventory.neo4j.graph.graphdb.Value;
+import com.blueplanet.inventory.rest.constants.ProjectLabels;
+import com.blueplanet.inventory.rest.constants.ProjectPropertyKeys;
+import com.blueplanet.inventory.rest.constants.ProjectRelationshipTypes;
+import com.blueplanet.inventory.rest.controller.bulkconnection.ConnectionVO;
+import com.blueplanet.inventory.rest.controller.bulkconnection.RoutingComponent;
+import com.blueplanet.inventory.rest.controller.connection.api.ConnectionAPI;
+import com.blueplanet.inventory.rest.controller.namingapi.ConnectionNamingInterface;
+import com.blueplanet.inventory.rest.controller.namingapi.GenericNaming;
+import com.blueplanet.inventory.rest.controller.planning.SessionContextToPerspective;
+import com.blueplanet.inventory.rest.controller.planning.TimeSliderPerspectiveVO;
+import com.blueplanet.inventory.rest.model.common.BaseIdentifiableObjectWithTimestamp;
+import com.blueplanet.inventory.rest.model.uitoneo4j.ObjectClassIdToMetamodelId;
+import com.blueplanet.inventory.rest.security.SecurityUtils;
+import com.blueplanet.data.core.exception.DAOException;
+import com.blueplanet.data.core.valueobject.SessionContext;
+
+
+@Component
+public class ConnectionNaming implements ConnectionNamingInterface {
+
+	public static final String VALUE_UNKNOWN = "UNKNOWN";
+
+	@Autowired
+	FusionGraphInventoryEnriched inventoryDao;
+
+	@Autowired
+	ObjectClassIdToMetamodelId objectClassToMetaModelIdMapper;
+
+	@Autowired
+	GenericNaming genericNaming;
+
+	private static final String TEMP_NUM_STRING = "****";
+
+	private static final String BWSTRING = "XX";
+
+	private static Logger log = LoggerFactory.getLogger(ConnectionAPI.class);
+
+	public String getClli(Node node, SessionContext sessionContext) {
+
+		TimeSliderPerspectiveVO tsVO = SessionContextToPerspective.getPerspectiveForTimeSlider(sessionContext);
+
+		String clli = "NoCLLI";
+
+		Map<String, Object> params = new HashMap<>();
+		params.put("id", node.getId());
+
+//		String query = "with ? as input match p=(start)-[:HAS_LOGICAL*0..9]->()<-[:HAS*0..9]-(:Location) where ID(start) = input.id return p";
+		String query = NamingApiSQL.fetchSqlByKey(NamingApiSQL.SQL_KEY.getClli);
+		//Subgraph subgraph = inventoryDao.queryForSubgraph(query, params);
+		
+		Subgraph subgraph = inventoryDao.queryForSubgraph(query, params, tsVO.getPerspctives(), tsVO.getStartOfDayInMillis(), tsVO.getEndOfDayInMillis(), SecurityUtils.getSecuritySessionVO(sessionContext));
+		
+		Boolean foundClli = false;
+
+		Node currentNode = node;
+
+		String startNodeClli = getClliValue(currentNode);
+
+		if (!StringUtils.isBlank(startNodeClli)) {
+			clli = startNodeClli;
+			foundClli = true;
+		}
+
+		Boolean noMoreLogical = false;
+
+		while (!foundClli){
+
+			Set<Node> nodeSet = subgraph.getRelatedNodes( currentNode, Direction.OUTGOING, ProjectRelationshipTypes.RELATIONSHIP_HAS_LOGICAL);
+
+			if ((nodeSet==null)||(nodeSet.isEmpty())){
+				break;
+			}
+
+			
+			Node logNode = nodeSet.iterator().next();
+			currentNode = logNode;
+			String nodeClli = getClliValue(logNode);
+			if (!StringUtils.isBlank(nodeClli)) {
+				clli = nodeClli;
+				foundClli = true;
+			}
+
+		}
+
+
+		Set<Node> checkedNodes = new HashSet<>();
+		
+		Queue<Node> nodeQueue = new LinkedList<Node>();
+		nodeQueue.add(currentNode);
+		
+		while (!foundClli){
+
+			if (nodeQueue.isEmpty()){
+				break;
+			}
+
+			log.debug("QUEUE "+nodeQueue);
+
+			currentNode = nodeQueue.remove();
+			
+			Set<Node> nodeSet = subgraph.getRelatedNodes( currentNode, Direction.INCOMING, ProjectRelationshipTypes.RELATIONSHIP_HAS);
+
+			
+			
+			for (Node relatedNode: nodeSet) {
+				if ((!checkedNodes.contains(relatedNode))&&(!nodeQueue.contains(relatedNode))) {
+					nodeQueue.add(relatedNode);
+				}
+			}
+			
+			
+			//while (!nodeQueue.isEmpty()){
+			
+					String nodeClli = getClliValue(currentNode);
+				
+					if (!StringUtils.isBlank(nodeClli)) {
+						clli = nodeClli;
+						foundClli = true;
+					}
+					checkedNodes.add(currentNode);
+				
+				
+			//}
+			
+			//currentNode = checkNode;
+			
+		}
+		
+
+		
+		return clli;
+	}
+
+	
+
+	private String getClliValue(Node node) {
+		String clli = null;
+		
+		if (!StringUtils.isBlank(node.getPropertyAsString(ProjectPropertyKeys.equipmentClli))) {
+			clli = node.getPropertyAsString(ProjectPropertyKeys.equipmentClli);
+		} else if (!StringUtils.isBlank(node.getPropertyAsString(ProjectPropertyKeys.clli))) {
+			clli = node.getPropertyAsString(ProjectPropertyKeys.clli);
+		} else if (!StringUtils.isBlank(node.getPropertyAsString(ProjectPropertyKeys.deviceName))) {
+			clli = node.getPropertyAsString(ProjectPropertyKeys.deviceName);
+		} else if(node.hasLabel(TechnologyLabels.Location)) {
+			clli = node.getPropertyAsString(ProjectPropertyKeys.name);
+		}
+
+		return clli;
+	}
+
+
+	private String getShortCode(Long conectionAchetyeId, Long startPortAcetypeId,
+			Long channelizationArcheType, SessionContext sessionContext) {
+			
+			String shortName = ConnectionNamingConstants.shortNameMap.get(conectionAchetyeId);
+			if ((channelizationArcheType!=null)&&((shortName!=null)&&(shortName.contains("XX")))) {
+				Node bw = inventoryDao.fetchNode(ProjectLabels.Archetype, new Value(channelizationArcheType), SecurityUtils.getNoSecuritySessionVO(sessionContext));
+				if (bw!=null) {
+					String bandwidthName = bw.getPropertyAsString(ProjectPropertyKeys.name);
+					String bwName = "";
+					//the bandwidth name should have the number followed by a space
+					//if not we will just take the fisrt two char.
+					if (bandwidthName.length()>1) {
+						if (bandwidthName.contains(" ")) {
+							bwName = bandwidthName.substring(0, bandwidthName.indexOf(" ")+1);
+						} else {
+							bwName = bandwidthName.substring(0, 2);		
+						}
+					} else {
+						bwName = bandwidthName;
+					}
+					bwName = bwName.trim();
+					shortName =  shortName.replace(BWSTRING, bwName);
+				}
+			}
+			
+			return shortName;
+	}
+
+	
+	public List<BaseIdentifiableObjectWithTimestamp> getEnds(ConnectionVO connectionVO){
+		List<BaseIdentifiableObjectWithTimestamp> list = new ArrayList<>();
+
+		for (Long key: connectionVO.getEndsOfConnections()) {
+			for (List<RoutingComponent> sectionList: connectionVO.getRouteComponents()) {
+				for (RoutingComponent component: sectionList) {
+					if (component.getKey()==key) {
+						BaseIdentifiableObjectWithTimestamp routeComponent = component.getExistingRouteComponent();
+						
+						if (routeComponent==null) {
+							if (component.getChannelArchetypeInstanceId()!=null) {
+								if (component.getParentLogicalInterface()!=null) {
+									for (BaseIdentifiableObjectWithTimestamp parent: component.getParentLogicalInterface()) {
+										routeComponent = parent;
+										break;
+									}
+								}
+								if (routeComponent==null) {
+									throw new DAOException(L10nUtils.getMessage(ProjectMessages.msg_error_unable_to_get_to_find_CLLI));
+								}
+							}
+						}
+						
+						if ((routeComponent==null)&&(component.getConnectionVO()!=null)) {
+							routeComponent =  null;
+						}
+
+						list.add(routeComponent);
+					}
+				}
+			}
+		}
+		return list;
+	}
+
+	@Override
+	public ConnectionVO generateName(Node connectionNode, ConnectionVO connectionVO, SessionContext sessionContext) {
+		String name = "";
+
+		String exisitngName = "";
+		String numbers = "";
+		String endOfName = "";
+
+		String connectionTypeName = connectionVO.getConnectionType();
+		
+		if ((connectionNode!=null)&&(connectionNode.getPropertyAsString(ProjectPropertyKeys.connection_userDefinedName)!=null)
+				&&(connectionNode.getPropertyAsString(ProjectPropertyKeys.connection_userDefinedName).equalsIgnoreCase("Y"))) {
+			return connectionVO;
+		}
+		
+
+		if ((connectionVO.getUserGeneratedName()!=null)&&(!connectionVO.getUserGeneratedName().isEmpty())) {
+			connectionVO = setNameProperty(connectionVO, connectionVO.getUserGeneratedName(), true);
+			return connectionVO;
+		}
+		
+		//get the existing name if we have already created the connection
+		if ((connectionVO.getConnection()!=null)||(connectionNode!=null)) {
+			
+			//if the connection node is not supplied we can try and get it from the connectionvo object
+			if (connectionNode==null) {
+				Long metamodelId=objectClassToMetaModelIdMapper.getMetaModelId(connectionVO.getConnection().getObjectClassId());
+
+				Label mainLabel=Label.findById(metamodelId);
+
+				connectionNode = inventoryDao.fetchNode(mainLabel, new Value(connectionVO.getConnection().getObjectId()), SecurityUtils.getNoSecuritySessionVO(sessionContext));
+			}
+			
+			if (connectionNode!=null) {
+				exisitngName = connectionNode.getPropertyAsString(ProjectPropertyKeys.name);
+				
+				if (!exisitngName.contains("/")) {
+					return connectionVO;
+				}
+				
+				numbers = getStartNumbers(exisitngName);
+				endOfName = getEndOfName(exisitngName);
+			}
+			
+		}
+
+		String connectionTypeAI = connectionVO.getArchetypeInstanceIdForCreation();
+		Long channelizationArcheType = connectionVO.getChannelisationArchetype();//portAI
+
+		List<BaseIdentifiableObjectWithTimestamp> ends = getEnds(connectionVO);
+
+		BaseIdentifiableObjectWithTimestamp aEnd = null;
+		BaseIdentifiableObjectWithTimestamp zEnd = null;
+
+		if ((ends!=null)&&(ends.size()>0)) {
+			 aEnd = ends.get(0);
+			 if (ends.size()>1) {
+				 zEnd = ends.get(ends.size()-1);
+			 }
+		} else {
+			log.warn("ConnectionNaming -- No ends suppled for ConnectionVO "+connectionVO);
+		}
+
+		String aClli = "";
+		String zClli = "";
+
+		if (aEnd!=null) {
+			Long metamodelId=objectClassToMetaModelIdMapper.getMetaModelId(aEnd.getObjectClassId());
+			Label mainLabel=Label.findById(metamodelId);
+
+			Node aEndNode = inventoryDao.fetchNode(mainLabel, new Value(aEnd.getObjectId().longValue()), SecurityUtils.getSecuritySessionVO(sessionContext));
+
+			aClli = getClli(aEndNode, sessionContext);
+		} else {
+			aClli = VALUE_UNKNOWN;
+		}
+
+
+		if (zEnd!=null) {
+			Long metamodelId=objectClassToMetaModelIdMapper.getMetaModelId(zEnd.getObjectClassId());
+			Label mainLabel=Label.findById(metamodelId);
+
+			Node zEndNode = inventoryDao.fetchNode(mainLabel, new Value(zEnd.getObjectId().longValue()), SecurityUtils.getSecuritySessionVO(sessionContext));
+
+			zClli = getClli(zEndNode, sessionContext);
+		} else {
+			zClli = VALUE_UNKNOWN;
+		}
+
+		if (StringUtils.isBlank(aClli)){
+			aClli = VALUE_UNKNOWN;
+		}
+		if (StringUtils.isBlank(zClli)){
+			zClli = VALUE_UNKNOWN;
+		}
+		
+
+		
+		name = generateConnectionName(connectionTypeName, Long.parseLong(connectionTypeAI), channelizationArcheType, aClli, zClli, channelizationArcheType, sessionContext);
+
+		//if we already have a name, we need to check if the end of the name is the same, if it is we can use the old name
+		//required for when the connections moves or is copied etc
+		if (!StringUtils.isEmpty(endOfName)) {
+			String endOfNewName = getEndOfName(name);
+			if (!StringUtils.isEmpty(endOfNewName)){
+				if (endOfName.equals(endOfNewName)){
+					//if the end of the name is the same then we can keep the existing name with its numbers
+					name = exisitngName;
+				}
+			}
+		}
+		
+		log.debug("Generated Connection Name "+name);
+		
+		return setNameProperty(connectionVO, name, false);
+	}
+
+	public String generateConnectionName(String connectionTypeName, Long conectionAchetypeId, Long startPortAcetypeId, String startCLLI, String endCLLI, Long channelizationArcheType, SessionContext sessionContext) {
+
+		String name = "";
+
+		//CTP-1007
+		//Have CLLIs in aphabetical order
+		
+		//if supplied values are null set to unknown
+		if (startCLLI==null) {
+			startCLLI="Unknown";
+		}
+		if (endCLLI==null) {
+			endCLLI="Unknown";
+		}
+		
+		String aEndClli = startCLLI;
+		String zEndClli = endCLLI;
+		
+		int compare = startCLLI.compareTo(endCLLI);
+		
+		if (compare>0) {
+			startCLLI = zEndClli;
+			endCLLI = aEndClli;
+		} 
+		//CGP-1007 end
+		
+		if ( ConnectionNamingConstants.noConnectionNaming.contains(conectionAchetypeId)) {
+			return genericNaming.generateName(conectionAchetypeId, sessionContext);
+		}
+
+		String shortCode = getShortCode(conectionAchetypeId, startPortAcetypeId, channelizationArcheType, sessionContext);
+
+		if ((shortCode==null)||(shortCode.isEmpty())) {
+			return genericNaming.generateName(conectionAchetypeId, sessionContext);
+		} else {
+			name = TEMP_NUM_STRING+"/"+connectionTypeName+"-"+shortCode+"/"+startCLLI+"/"+endCLLI;
+		}
+		
+		return name.replace("\'", "\\'").replace("\"", "\\\"");
+	}
+
+	/**
+	 * returns empty string if null or not numbers
+	 * 
+	 * @param name the string to be validated if it consists of number or not
+	 * @return first part of the string before the "/" if they are numbers
+	 */
+	public String getStartNumbers(String name) {
+		
+		String numberString = "";
+		
+		if (StringUtils.isEmpty(name)) {
+			return numberString;
+		}
+		
+		String numbers = name.substring(0,  name.indexOf("/"));
+
+		if ((numbers!=null)&&(!numbers.isEmpty())) {
+			if (numbers.matches("[0-9]+")){
+				numberString = numbers;
+			}
+		}
+		return numberString;
+	}
+	
+	/**
+	 * @param name the string to fetch the end of name
+	 * @return string after the first "/"
+	 */
+	public String getEndOfName(String name) {
+		String endOfName = "";
+		
+		if (StringUtils.isEmpty(name)) {
+			return endOfName;
+		}
+		
+		endOfName = name.substring(name.indexOf("/"));
+		
+		return endOfName;
+	}
+	
+	@Override
+	public String generateNameForCopiedOrMovedConnection(String nameToCopy, String oldCLLICode, String newCLLICode) {
+		String newName=nameToCopy;
+
+		String numbers = nameToCopy.substring(0,  nameToCopy.indexOf("/"));
+
+		if ((numbers!=null)&&(!numbers.isEmpty())) {
+			if (numbers.matches("[0-9]+")){
+				newName = newName.replace(numbers, TEMP_NUM_STRING);
+			}
+		}
+
+		if (newCLLICode!=null) {// ((oldCLLICode!=null)&&(newCLLICode!=null))&&(!oldCLLICode.isEmpty())&&(!newCLLICode.isEmpty())){
+			newName = newName.replace(oldCLLICode, newCLLICode);
+		} else {
+			newName = newName.replace(oldCLLICode, "NO-CLLI");
+		}
+
+		return newName;
+	}
+
+	private ConnectionVO setNameProperty(ConnectionVO connectionVo, String name, Boolean isUserGenerated) {
+		
+		Map<Value, PropertyContainer> propsCont = connectionVo.getProperties();
+
+		PropertyContainer props = propsCont.get(connectionVo.getArchetypeInstanceIdForCreation());
+
+		if (props==null) {
+			if (!propsCont.isEmpty()) {
+			 Entry<Value, PropertyContainer> entry = propsCont.entrySet().iterator().next();
+			 //Value key = entry.getKey();
+			 PropertyContainer value = entry.getValue();
+			 props = value;
+			}
+		}
+
+		if ((name!=null)
+				||(!StringUtils.isBlank(name))
+					||(!"null".equals(name))) {
+			if (props==null) {
+				props=new PropertyContainerBuilder().build();
+				propsCont.put(new Value(connectionVo.getArchetypeInstanceIdForCreation()), props);
+			}
+
+			//remove incase already there and not set
+			props.remove(ProjectPropertyKeys.name);
+
+			props.put(ProjectPropertyKeys.name, new Value(name));
+			
+			if (isUserGenerated) {
+				props.put(ProjectPropertyKeys.connection_userDefinedName, new Value("Y"));
+			}
+
+		}
+		
+		connectionVo.setProperties(propsCont);
+		
+		return connectionVo;
+		
+	}
+	
+}

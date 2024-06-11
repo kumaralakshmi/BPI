@@ -1,0 +1,215 @@
+package org.bpi.demo;
+/*
+Data Ingestion Framework Lab
+
+This is Ingestion Rule example for creating Device Node.
+*/
+import org.json.JSONObject;
+import org.json.JSONArray;
+import java.lang.String;
+import java.util.Collections;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
+import com.blueplanet.inventory .ingestionFramework.decisionengine.vo.IngestionDecisionResourceVO;
+import com.blueplanet.inventory.ingestionFramework.decisionengine.vo.IngestionDecisionRelVO;
+import com.blueplanet.inventory.ingestionFramework.decisionengine.vo.IngestionDecisionVO;
+
+global List<com.blueplanet.inventory.ingestionFramework.decisionengine.vo.IngestionDecisionVO> ingestionOutput;
+
+
+
+rule "Create Cable Fiber Connection"
+dialect "java"
+salience -1
+activation-group "Exam_Data_Ingestion"
+
+    when
+        // START STEP 1 
+        // Create condition which will match only events that create resource com.bp.inv.metamodel.PhysicalConnection
+        // <<<<<<<<<<<<<
+        
+        $event: JSONObject(
+has("event") &&
+getJSONObject("event").getString("_type") contains "ResourceCreated"
+&&
+getJSONObject("event").has("resource") && 
+getJSONObject("event").getJSONObject("resource").getString("resourceTypeId") contains "PhysicalConnection"
+)
+
+
+        // END STEP 1
+
+
+    then
+        // START STEP 2
+        // Extract JSON object "resource" from event message into variable "connectionData"
+        // <<<<<<<<<<<<<
+        
+        JSONObject connectionData = $event.getJSONObject("event").getJSONObject("resource");
+        
+        // END STEP 2
+        
+
+        String connectionName = connectionData.getString("label");
+        System.out.println("Creating physical connection with name: " + connectionName);
+
+        // creating decision object for the connection node
+        IngestionDecisionVO createConnectionNodeDecision = createConnectionNode(connectionData);
+        ingestionOutput.add(createConnectionNodeDecision);
+
+        /* 
+          creating decision object for a relationship from the connection 
+          node to the PhysicalPort node which is the source node of the connection
+        */
+        IngestionDecisionVO createConnectionRelationshipsDecisionSeq1 = createConnectionRelationships(connectionData, true);
+        ingestionOutput.add(createConnectionRelationshipsDecisionSeq1);
+
+        /* 
+          creating decision object for a relationship from the connection 
+          node to the PhysicalPort node which is the target node of the connection
+        */
+        IngestionDecisionVO createConnectionRelationshipsDecisionSeq2 = createConnectionRelationships(connectionData, false);
+        ingestionOutput.add(createConnectionRelationshipsDecisionSeq2);
+    end
+    
+
+    /*
+     * This function returns decision object necessary to modify existing or create 
+     * new connection node based on information passed in the event message
+     * 
+     * @param   connectionData    JSON object containing resource information 
+     *                            necessary to create or modify the connection node
+     */
+    function IngestionDecisionVO createConnectionNode(JSONObject connectionData) {
+        IngestionDecisionResourceVO createConnectionNodeDecision = new IngestionDecisionResourceVO();
+        createConnectionNodeDecision.setEventType("com.bp.inv.ResourceCreated");
+        String connectionName = connectionData.getString("label");
+
+        
+        // START STEP 3
+        // Set the query and query parameters for matching connection node if it exists in the database.
+        // <<<<<<<<<<<<<
+        HashMap matchingQueryListParams = new HashMap<String, Object>();
+        matchingQueryListParams.put("connectionName", connectionName);
+        matchingQueryListParams.put("uuidPropName", "name");
+   createConnectionNodeDecision.setMatchingQueryList(Collections.singletonList("MATCH(c:PhysicalConnection) WHERE c[$connectionUuidPropName]=$ingestion_uuid RETURN c AS output limit 1")); 
+   createConnectionNodeDecision.setMatchingQueryListParams(Collections.singletonList(matchingQueryListParams));
+
+
+        // END STEP 3
+        
+
+        // START STEP 4
+        // Extract the archetype name from event message 
+        // and set the query to match archetype instance based on the archetype name
+        // <<<<<<<<<<<<<
+        String archetypeName = connectionData.getJSONObject("properties").getString("atType");
+
+        HashMap<String, Object> archetypeQueryParams = new HashMap<String, Object>();
+        archetypeQueryParams.put("archetypeName", archetypeName);
+        createConnectionNodeDecision.setArchetypeInstanceQueryParams(archetypeQueryParams);
+
+        createConnectionNodeDecision.setArchetypeInstanceQuery("MATCH (Archetype{name:$archetypeName})<-[:HAS_ARCHETYPE]-(archetypeInstance:ArchetypeInstance) return archetypeInstance.drniId as output limit 1");
+
+        // END STEP 4
+
+
+        //Node properties
+        HashMap<String, Object> connectionProperties = new HashMap<String, Object>();
+    
+        JSONObject resourceProperties = connectionData.getJSONObject("properties");
+        connectionProperties.put("name", connectionName);
+        connectionProperties.put("data_ingestion", true);
+        
+        createConnectionNodeDecision.setNodeProperties(connectionProperties);
+        createConnectionNodeDecision.setUpdateProperties(true);
+
+        //set exception and callout
+        createConnectionNodeDecision.setRetryMessage("Retry Exception : Unable to find the resource node with given parameters in DB");
+        createConnectionNodeDecision.setCustomCallout("com.blueplanet.inventory.ingestionFramework.callouts.PostIngestionCallout.createOrModifyCallout");
+
+        return createConnectionNodeDecision;
+    }
+
+    /*
+     * This function returns decision object necessary to create new relationship 
+     * from the connection node to the source or target object of the connection.
+     * 
+     * @param   connectionData    JSON object containing resource information necessary
+     *                            to create the relationship for the connection node
+     * 
+     * @param   isSource          Whether the relationship needs to be created toward 
+     *                            source object of the connection
+     */
+    function IngestionDecisionVO createConnectionRelationships(JSONObject connectionData, boolean isSource){
+        IngestionDecisionRelVO createRelationshipsDecision = new IngestionDecisionRelVO();
+        createRelationshipsDecision.setEventType("com.bp.inv.RelationshipCreated");
+        String connectionName = connectionData.getString("label");
+        
+        
+        // START STEP 5
+        // Set necessary query and query parameters to match the 
+        // connection node as source node of the relationship
+        // <<<<<<<<<<<<<
+        Map<String, Object> matchingQueryListParamsSource = new HashMap<String, Object>();
+        matchingQueryListParamsSource.put("connectionName", connectionName);
+        matchingQueryListParamsSource.put("uuidPropName", "name");
+//createRelationshipsDecision.setMatchingQueryListParams(Collections.singletonList(matchingQueryListParamsSource));
+createRelationshipsDecision.setMatchingQueryListForSource(Collections.singletonList("MATCH(c:PhysicalConnection) WHERE c[$uuidPropName]=$connectionName RETURN c AS output"));
+        // END STEP 5
+
+        
+        // START STEP 6
+        // Set necessary query parameters to match the 
+        // source or target node of the connection as the target node of the relationship
+        // <<<<<<<<<<<<<
+        Map<String, Object> matchingQueryListParamsTarget = new HashMap<String, Object>();
+        matchingQueryListParamsTarget.put("uuidPropName", "name");
+        if(isSource){
+            matchingQueryListParamsTarget.put("device", connectionData.getJSONObject("properties").getString("target"));
+            matchingQueryListParamsTarget.put("physicalPort", connectionData.getJSONObject("properties").getString("targetPhysicalPort"));    
+        } else {
+            matchingQueryListParamsTarget.put("device", connectionData.getJSONObject("properties").getString("target"));
+            matchingQueryListParamsTarget.put("physicalPort", connectionData.getJSONObject("properties").getString("targetPhysicalPort"));
+        }
+        createRelationshipsDecision.setSingleMatchTarget(true);
+        createRelationshipsDecision.setMatchingQueryListParamsForTarget(Collections.singletonList(matchingQueryListParamsTarget));
+        createRelationshipsDecision.setMatchingQueryListForTarget(Collections.singletonList("Match (d:Device)-[:HAS]->(pp:PhysicalPort) where d[$uuidPropName]=$device and pp[$uuidPropName]=$physicalPort return pp as output"));
+        // END STEP 6
+
+        
+        // START STEP 7
+        // Set the relationship type
+        // <<<<<<<<<<<<<
+
+       createRelationshipsDecision.setRelationshipType("HAS_CONNECTION_COMPONENT");
+        
+        // END STEP 7
+        
+        
+        // START STEP 8
+        // set relationship properties
+        // <<<<<<<<<<<<<
+        Map<String, Object> relProps = new HashMap<String, Object>();
+        relProps.put("sectionNumber",1);
+        relProps.put("segmentNumber",1);
+        if(isSource){
+            relProps.put("seq", 1);
+        } else {
+            relProps.put("seq", 2);
+        } 
+        relProps.put("stickToAdjacent", false);
+        relProps.put("isNotInRoute", "N");
+        relProps.put("data_ingestion", true);
+        createRelationshipsDecision.setRelProperties(relProps);
+        // END STEP 8
+
+
+        //set error and warning messages
+        createRelationshipsDecision.setRetryMessage("Unable to find the Connection with given id(s)" + connectionName + " in DB");
+        createRelationshipsDecision.setExceptionMessage("Exception occurred while trying to create connection relationships for " + connectionName);
+        
+        return createRelationshipsDecision;
+    }
